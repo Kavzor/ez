@@ -1,4 +1,4 @@
-const event = (function () {
+const Event = (function () {
     let participants = [];
 
     const invoke = function (ref, data) {

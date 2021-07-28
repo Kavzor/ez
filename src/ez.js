@@ -1,76 +1,165 @@
-function Ez(baseDir = "/src/components/") {
-    this.root = document.querySelector('#root');
-    this.root = this.root != undefined ? this.root : document.querySelector('body');
-    this.components = {};
-    this.baseDir = baseDir;
-    this.contexts = {};
-    this.context = undefined;
+function View(controller, script) {
+    this.subviews = new Array();
+    this.proxies = new Array();
+    this.context = { controller: controller, script: script, bindings: [], listeners: {} };
 }
 
-Ez.prototype.register = function (componentRef, component) {
+function ScriptBuilder(element) {
+    this.element = element;
+}
+
+ScriptBuilder.prototype.controller = function (controller) {
+    let view = new View(controller, this.element);
+    ez.views[controller.setting.tag] = view;
+    ez.load(view, ez.discoverProxies, ez.attachProxies);
+}
+
+ScriptBuilder.prototype.module = function (module) {
+    ez.modules.push(module);
+}
+
+function Ez(baseDir = "/src/", root = document.body) {
+    this.root = root;
+    this.views = new Array();
+    this.modules = new Array();
+    this.baseDir = baseDir;
+    this.activeView = undefined;
+}
+
+Ez.prototype.add = function (ref, callback) {
     let script = document.createElement('script');
-    script.src = this.baseDir + componentRef;
-    script.component = component;
-    script.componentRef = componentRef;
-    script.onload = addComponent;
+    script.src = this.baseDir + ref;
+    script.onload = function (event) {
+        if (event.eventPhase == 2) {
+            callback(new ScriptBuilder(script));
+        }
+    }
     document.body.appendChild(script);
 }
 
-Ez.prototype.swapContext = function (next) {
-    if (!this.context) {
-        this.context = { component: next };
-    }
-    if (!this.contexts[next.name]) {
-        this.contexts[next.name] = { component: next };
-    }
-    if (this.context.component.style.parentNode) {
-        this.context.component.style.parentNode.removeChild(this.context.component.style);
-    }
-    if (this.context.component.tag.parentNode) {
-        this.context.component.tag.parentNode.removeChild(this.context.component.tag);
-    }
-    this.contexts[this.context.component.name] = this.context;
-    this.context = this.contexts[next.name];
-    this.root.appendChild(this.context.component.tag);
-    document.head.appendChild(this.context.component.style);
+Ez.prototype.load = function (view, ...then) {
+    let ref = view.context.script.src;
+    ref = ref.substring(0, ref.lastIndexOf("/") + 1) + view.context.controller.setting.template;
+    fetch(ref).then(response => response.text().then(template => {
+        view.context.template = template;
+        view.context.html = document.createElement(view.context.controller.setting.tag);
+        view.context.html.append(...(new DOMParser().parseFromString(template, 'text/html')).body.childNodes);
+        view.context.listeners.keys = {
+            type: "keydown",
+            action: event => {
+                if (this.activeView.context.controller.keys[event.key]) {
+                    this.activeView.context.controller.keys[event.key](this.activeView.context.controller);
+                    this.activeView.context.controller.keys['all'](this.activeView.context.controller);
+                }
+            }
+        }
+        then.forEach(invocation => invocation(view));
+        if (window.location.hash == view.context.controller.setting.path) {
+            this.activeView = view;
+            ez.changeView(view);
+        }
+    }));
 }
 
-function addComponent() {
-    var component = eval(this.component);
-    component.name = this.component;
-    ez.components[component.name] = component;
-    loadFile(this.src.substring(0, this.src.lastIndexOf("/") + 1) + component.setting.template, template => {
-        component.tag = document.createElement(this.component);
-        component.template = template;
-        component.tag.innerHTML = template;
-        loadFile(this.src.substring(0, this.src.lastIndexOf("/") + 1) + component.setting.style, style => {
-            component.style = document.createElement('style');
-            component.style.innerHTML = this.component + " " + style.replace(" ", "").replace("} ", `} ${this.component} `);
-            if (window.location.hash.substring(2) == component.setting.path) {
-                ez.swapContext(component);
+Ez.prototype.changeView = function (view) {
+    if (this.activeView.context.html.parentNode) {
+        this.activeView.context.html.parentNode.removeChild(this.activeView.context.html);
+    }
+
+    this.root.removeEventListener(this.activeView.context.listeners.keys.type, this.activeView.context.listeners.keys.action)
+
+    this.activeView = view;
+    this.root.appendChild(view.context.html);
+
+    this.root.addEventListener(this.activeView.context.listeners.keys.type, this.activeView.context.listeners.keys.action)
+}
+
+
+Ez.prototype.refresh = function (binding) {
+    binding.nodes.forEach(node => {
+        let expressions = binding.raw.match(/(?<=\{\{).+?(?=\}\})/g);
+        let nodeContent = binding.raw;
+        expressions.forEach(expression => {
+            nodeContent = nodeContent.replace(`{{${expression}}}`, this.activeView.context.controller[expression]);
+        });
+        node.nodeValue = nodeContent
+    });
+}
+
+Ez.prototype.discoverProxies = function (view) {
+    view.context.html.querySelectorAll('*').forEach(node => {
+        node.childNodes.forEach(childNode => {
+            if (childNode.nodeType == Node.TEXT_NODE) {
+                let bindings = childNode.nodeValue.match(/(?<=\{\{).+?(?=\}\})/g);
+                let rawContent = childNode.nodeValue;
+                if (bindings) {
+                    bindings.forEach(binding => {
+                        if (!view.context.bindings[binding]) {
+                            let value = view.context.controller.data[binding]
+                            if (binding.includes(".")) {
+                                let seperations = binding.split(".");
+                                value = view.context.controller.data[seperations[0]][seperations[1]];
+                                for (let i = 2; i < seperations.length; i++) {
+                                    value = value[seperations[i]];
+                                }
+                            }
+                            view.context.bindings[binding] = {
+                                nodes: [],
+                                value: value,
+                                raw: rawContent
+                            }
+                        }
+                        view.context.bindings[binding].nodes.push(childNode);
+                        childNode.nodeValue = childNode.nodeValue.replace(`{{${binding}}}`, view.context.bindings[binding].value);
+                    });
+                }
+            }
+        });
+    });
+}
+
+Ez.prototype.attachProxies = function (view) {
+    view.context.controller.component = new Proxy(view.context.controller.data, {
+        get: function (target, prop, receiver) {
+            return target[prop];
+        },
+        set: function (obj, prop, newval) {
+            obj[prop] = newval;
+            ez.refresh(view.context.bindings[prop]);
+            return true;
+            //controller.data[prop][index].value = value;
+            //ez.updateContext(controller, prop, value);
+        }
+    });
+    console.log(view.context.controller.component);
+}
+
+function addcontroller() {
+    var controller = eval(this.controller);
+    controller.name = this.controller;
+    ez.controllers[controller.name] = controller;
+    loadFile(this.src.substring(0, this.src.lastIndexOf("/") + 1) + controller.setting.template, template => {
+        controller.template = template;
+        controller.tag = document.createElement(this.controller);
+        attachDom(controller.tag, template);
+        adaptAndListen(controller);
+        loadFile(this.src.substring(0, this.src.lastIndexOf("/") + 1) + controller.setting.style, style => {
+            controller.style = document.createElement('style');
+            controller.style.innerHTML = this.controller + " " + style.replace(" ", "").replace("} ", `} ${this.controller} `);
+            if (window.location.hash.substring(2) == controller.setting.path) {
+                ez.swapContext(controller);
             }
         });
     });
 
 }
 
-function loadFile(ref, callback) {
-    fetch(ref).then(response => {
-        response.text().then(content => {
-            callback(content);
-        });
-    });
-}
-
 window.addEventListener('hashchange', function (event) {
     let path = event.target.location.hash.substring(2);
-    for (component in ez.components) {
-        component = ez.components[component]
-        if (path == component.setting.path) {
-            ez.swapContext(component);
+    for (view in ez.views) {
+        if (path == view.context.controller.setting.path) {
+            ez.changeView(view);
             return true;
         }
     }
 });
-
-const ez = new Ez();
